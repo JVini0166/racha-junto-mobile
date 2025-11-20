@@ -1,86 +1,221 @@
-import { useState, useRef } from 'react';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { useFocusEffect } from '@react-navigation/native';
+import { Image } from 'expo-image';
+import * as NavigationBar from 'expo-navigation-bar';
+import { router } from 'expo-router';
+import * as SystemUI from 'expo-system-ui';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ScrollView,
-  StyleSheet,
-  View,
-  TouchableOpacity,
-  TextInput,
+  ActivityIndicator,
+  Alert,
   Animated,
   Dimensions,
+  Platform,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 import { ThemedText } from '@/components/themed-text';
 import { Colors } from '@/constants/theme';
+import { useAuth } from '@/contexts/AuthContext';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { supabase } from '@/utils/supabase';
 
 const { width } = Dimensions.get('window');
+
+interface Group {
+  id: number;
+  name: string;
+  description: string | null;
+  visibility: 'public' | 'private';
+  owner_id: string;
+  image_url: string | null;
+  created_at: string;
+  member_count?: number;
+  pools?: Pool[];
+}
+
+interface Pool {
+  id: number;
+  title: string;
+  total_amount: number;
+  status: string;
+  pool_type: string;
+  participants_count?: number;
+}
 
 export default function FeedScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
+  const { user } = useAuth();
   const [selectedFilter, setSelectedFilter] = useState('Todos');
+  const [publicGroups, setPublicGroups] = useState<Group[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const scrollY = useRef(new Animated.Value(0)).current;
+
+  // Garante que a barra de status fique azul quando a tela ganha foco
+  const primaryBlue = Colors.light.primary;
+  useFocusEffect(
+    useCallback(() => {
+      if (Platform.OS === 'android') {
+        SystemUI.setBackgroundColorAsync(primaryBlue).catch(() => {});
+        NavigationBar.setStyle('dark');
+      }
+    }, [primaryBlue])
+  );
 
   // Filtros
   const filters = ['Todos', 'Viagens', 'Festas', 'Games', 'Assinaturas', 'Outros'];
 
-  // Dados mockados de rateios
-  const rateios = [
-    {
-      id: 1,
-      name: 'Churrasco da Firma 🍖',
-      group: 'Amigos do Trampo',
-      creator: { name: 'João Silva', avatar: '👨' },
-      category: 'Festa',
-      totalValue: 480,
-      participants: 6,
-      valuePerPerson: 80,
-      progress: 75,
-      timeLeft: 'Faltam 2 dias',
-      coverEmoji: '🍖',
-      friendsCount: 3,
-      color: colors.primary,
-    },
-    {
-      id: 2,
-      name: 'Viagem para Praia 🏖️',
-      group: 'Família',
-      creator: { name: 'Maria Santos', avatar: '👩' },
-      category: 'Viagem',
-      totalValue: 1200,
-      participants: 4,
-      valuePerPerson: 300,
-      progress: 50,
-      timeLeft: 'Faltam 5 dias',
-      coverEmoji: '🏖️',
-      friendsCount: 2,
-      color: colors.secondary,
-    },
-    {
-      id: 3,
-      name: 'Festa de Aniversário 🎉',
-      group: 'Amigos',
-      creator: { name: 'Pedro Costa', avatar: '👨' },
-      category: 'Festa',
-      totalValue: 850,
-      participants: 8,
-      valuePerPerson: 106.25,
-      progress: 100,
-      timeLeft: 'Encerrado',
-      coverEmoji: '🎉',
-      friendsCount: 5,
-      color: colors.accent,
-    },
-  ];
+  const loadPublicGroups = useCallback(async () => {
+    try {
+      setLoading(true);
 
-  // Grupos sugeridos
-  const suggestedGroups = [
-    { id: 1, name: 'Gamers Unidos', members: 132, emoji: '🎮', color: colors.purple },
-    { id: 2, name: 'Assinaturas Premium', members: 89, emoji: '📺', color: colors.orange },
-    { id: 3, name: 'Viagens Baratas', members: 245, emoji: '✈️', color: colors.teal },
-  ];
+      // Busca grupos públicos mais recentes
+      const { data: groupsData, error: groupsError } = await supabase
+        .from('groups')
+        .select('*')
+        .eq('visibility', 'public')
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      if (groupsError) {
+        console.error('Erro ao carregar grupos:', groupsError);
+        setPublicGroups([]);
+        return;
+      }
+
+      // Para cada grupo, busca informações adicionais
+      const groupsWithDetails = await Promise.all(
+        (groupsData || []).map(async (group) => {
+          // Conta membros ativos
+          const { count: memberCount } = await supabase
+            .from('group_members')
+            .select('*', { count: 'exact', head: true })
+            .eq('group_id', group.id)
+            .eq('active', true);
+
+          // Busca rateios ativos do grupo
+          const { data: poolsData } = await supabase
+            .from('financial_pools')
+            .select('id, title, total_amount, status, pool_type')
+            .eq('group_id', group.id)
+            .in('status', ['open', 'active'])
+            .order('created_at', { ascending: false })
+            .limit(3);
+
+          // Para cada rateio, conta participantes
+          const poolsWithCounts = await Promise.all(
+            (poolsData || []).map(async (pool) => {
+              const { count: participantsCount } = await supabase
+                .from('pool_participants')
+                .select('*', { count: 'exact', head: true })
+                .eq('pool_id', pool.id);
+
+              return {
+                ...pool,
+                participants_count: participantsCount || 0,
+              };
+            })
+          );
+
+          return {
+            ...group,
+            member_count: memberCount || 0,
+            pools: poolsWithCounts,
+          };
+        })
+      );
+
+      setPublicGroups(groupsWithDetails);
+    } catch (error) {
+      console.error('Erro ao carregar grupos públicos:', error);
+      setPublicGroups([]);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadPublicGroups();
+  }, [loadPublicGroups]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadPublicGroups();
+    }, [loadPublicGroups])
+  );
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    loadPublicGroups();
+  };
+
+  const handleJoinGroup = async (groupId: number) => {
+    if (!user?.id) {
+      Alert.alert('Erro', 'Você precisa estar logado para entrar em grupos');
+      return;
+    }
+
+    try {
+      // Verifica se já é membro
+      const { data: existingMember } = await supabase
+        .from('group_members')
+        .select('*')
+        .eq('group_id', groupId)
+        .eq('user_id', user.id)
+        .eq('active', true)
+        .single();
+
+      if (existingMember) {
+        Alert.alert('Info', 'Você já é membro deste grupo');
+        router.push(`/group/${groupId}`);
+        return;
+      }
+
+      // Adiciona como membro
+      const { error } = await supabase.from('group_members').insert({
+        group_id: groupId,
+        user_id: user.id,
+        role: 'member',
+        active: true,
+      });
+
+      if (error) {
+        Alert.alert('Erro', 'Não foi possível entrar no grupo');
+        return;
+      }
+
+      Alert.alert('Sucesso', 'Você entrou no grupo!', [
+        {
+          text: 'OK',
+          onPress: () => router.push(`/group/${groupId}`),
+        },
+      ]);
+    } catch (error) {
+      Alert.alert('Erro', 'Não foi possível entrar no grupo');
+    }
+  };
+
+  const getGroupColor = (groupId: number) => {
+    const colorsList = [
+      colors.primary,
+      colors.secondary,
+      colors.teal,
+      colors.purple,
+      colors.orange,
+      colors.pink,
+      colors.cyan,
+      colors.accent,
+    ];
+    return colorsList[groupId % colorsList.length];
+  };
 
   const headerOpacity = scrollY.interpolate({
     inputRange: [0, 100],
@@ -88,11 +223,7 @@ export default function FeedScreen() {
     extrapolate: 'clamp',
   });
 
-  const headerHeight = scrollY.interpolate({
-    inputRange: [0, 100],
-    outputRange: [100, 70],
-    extrapolate: 'clamp',
-  });
+  const headerHeight = 70;
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
@@ -100,7 +231,7 @@ export default function FeedScreen() {
         style={[
           styles.header,
           {
-            backgroundColor: colors.surface,
+            backgroundColor: colors.primary,
             height: headerHeight,
             opacity: headerOpacity,
             shadowColor: colors.shadow,
@@ -108,15 +239,15 @@ export default function FeedScreen() {
         ]}>
         <View style={styles.headerContent}>
           <TouchableOpacity style={styles.headerButton} activeOpacity={0.7}>
-            <MaterialIcons name="search" size={24} color={colors.text} />
+            <MaterialIcons name="search" size={24} color="#FFFFFF" />
           </TouchableOpacity>
 
           <View style={styles.logoContainer}>
-            <ThemedText style={[styles.logo, { color: colors.primary }]}>RachaJunto</ThemedText>
+            <ThemedText style={[styles.logo, { color: '#FFFFFF' }]}>RachaJunto</ThemedText>
           </View>
 
           <TouchableOpacity style={styles.headerButton} activeOpacity={0.7}>
-            <MaterialIcons name="notifications" size={24} color={colors.text} />
+            <MaterialIcons name="notifications" size={24} color="#FFFFFF" />
             <View style={[styles.notificationBadge, { backgroundColor: colors.error }]} />
           </TouchableOpacity>
         </View>
@@ -128,11 +259,12 @@ export default function FeedScreen() {
         onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
           useNativeDriver: false,
         })}
-        scrollEventThrottle={16}>
+        scrollEventThrottle={16}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}>
         {/* Mensagem de boas-vindas */}
         <View style={styles.welcomeSection}>
           <ThemedText style={[styles.welcomeText, { color: colors.text }]}>
-            Bom te ver de novo, João 👋
+            Descubra grupos públicos 👋
           </ThemedText>
         </View>
 
@@ -165,176 +297,170 @@ export default function FeedScreen() {
           ))}
         </ScrollView>
 
-        {/* Cards de Rateio */}
-        <View style={styles.rateiosContainer}>
-          {rateios.map((rateio, index) => (
-            <TouchableOpacity
-              key={rateio.id}
-              activeOpacity={0.9}
-              style={[
-                styles.rateioCard,
-                {
-                  backgroundColor: colors.surface,
-                  shadowColor: rateio.color + '20',
-                },
-              ]}>
-              {/* Imagem de capa */}
-              <View style={[styles.coverImage, { backgroundColor: rateio.color + '15' }]}>
-                <ThemedText style={styles.coverEmoji}>{rateio.coverEmoji}</ThemedText>
-              </View>
+        {/* Loading */}
+        {loading && publicGroups.length === 0 ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <ThemedText style={[styles.loadingText, { color: colors.textSecondary }]}>
+              Carregando grupos...
+            </ThemedText>
+          </View>
+        ) : publicGroups.length === 0 ? (
+          <View style={styles.emptyState}>
+            <ThemedText style={styles.emptyEmoji}>👥</ThemedText>
+            <ThemedText style={[styles.emptyTitle, { color: colors.text }]}>
+              Nenhum grupo público encontrado
+            </ThemedText>
+            <ThemedText style={[styles.emptySubtitle, { color: colors.textSecondary }]}>
+              Que tal criar o primeiro grupo público?
+            </ThemedText>
+          </View>
+        ) : (
+          /* Cards de Grupos */
+          <View style={styles.groupsContainer}>
+            {publicGroups.map((group) => {
+              const groupColor = getGroupColor(group.id);
+              const activePools = group.pools || [];
+              const totalPoolsValue = activePools.reduce((sum, pool) => sum + Number(pool.total_amount), 0);
+              const totalParticipants = activePools.reduce((sum, pool) => sum + (pool.participants_count || 0), 0);
 
-              <View style={styles.cardContent}>
-                {/* Header do card */}
-                <View style={styles.cardHeader}>
-                  <View style={styles.cardHeaderLeft}>
-                    <ThemedText type="defaultSemiBold" style={[styles.rateioName, { color: colors.text }]}>
-                      {rateio.name}
-                    </ThemedText>
-                    <View style={styles.groupInfo}>
-                      <MaterialIcons name="group" size={14} color={colors.textSecondary} />
-                      <ThemedText style={[styles.groupName, { color: colors.textSecondary }]}>
-                        {rateio.group}
-                      </ThemedText>
+              return (
+                <TouchableOpacity
+                  key={group.id}
+                  activeOpacity={0.9}
+                  style={[
+                    styles.groupCard,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.border,
+                      shadowColor: groupColor + '20',
+                    },
+                  ]}
+                  onPress={() => router.push(`/group/${group.id}`)}>
+                  {/* Foto do grupo */}
+                  <View style={[styles.groupCover, { backgroundColor: groupColor + '15' }]}>
+                    {group.image_url ? (
+                      <Image source={{ uri: group.image_url }} style={styles.groupCoverImage} contentFit="cover" />
+                    ) : (
+                      <ThemedText style={styles.groupCoverEmoji}>{group.name.charAt(0).toUpperCase()}</ThemedText>
+                    )}
+                  </View>
+
+                  <View style={styles.cardContent}>
+                    {/* Header do card */}
+                    <View style={styles.cardHeader}>
+                      <View style={styles.cardHeaderLeft}>
+                        <ThemedText type="defaultSemiBold" style={[styles.groupName, { color: colors.text }]}>
+                          {group.name}
+                        </ThemedText>
+                        {group.description && (
+                          <ThemedText
+                            style={[styles.groupDescription, { color: colors.textSecondary }]}
+                            numberOfLines={2}>
+                            {group.description}
+                          </ThemedText>
+                        )}
+                      </View>
+                    </View>
+
+                    {/* Informações do grupo */}
+                    <View style={styles.groupMeta}>
+                      <View style={styles.metaItem}>
+                        <MaterialIcons name="people" size={16} color={colors.textSecondary} />
+                        <ThemedText style={[styles.metaText, { color: colors.textSecondary }]}>
+                          {group.member_count || 0} membros
+                        </ThemedText>
+                      </View>
+                      {activePools.length > 0 && (
+                        <View style={styles.metaItem}>
+                          <MaterialIcons name="account-balance-wallet" size={16} color={colors.textSecondary} />
+                          <ThemedText style={[styles.metaText, { color: colors.textSecondary }]}>
+                            {activePools.length} rateio{activePools.length > 1 ? 's' : ''} ativo{activePools.length > 1 ? 's' : ''}
+                          </ThemedText>
+                        </View>
+                      )}
+                    </View>
+
+                    {/* Overview dos rateios */}
+                    {activePools.length > 0 && (
+                      <View style={styles.poolsOverview}>
+                        <ThemedText style={[styles.overviewTitle, { color: colors.text }]}>
+                          Rateios em andamento
+                        </ThemedText>
+                        {activePools.map((pool) => (
+                          <View key={pool.id} style={styles.poolItem}>
+                            <View style={styles.poolItemLeft}>
+                              <View
+                                style={[
+                                  styles.poolStatusDot,
+                                  {
+                                    backgroundColor:
+                                      pool.status === 'open'
+                                        ? '#2ECC71'
+                                        : pool.status === 'active'
+                                          ? '#3498DB'
+                                          : '#95A5A6',
+                                  },
+                                ]}
+                              />
+                              <ThemedText style={[styles.poolTitle, { color: colors.text }]} numberOfLines={1}>
+                                {pool.title}
+                              </ThemedText>
+                            </View>
+                            <View style={styles.poolItemRight}>
+                              <ThemedText style={[styles.poolAmount, { color: colors.primary }]}>
+                                R$ {Number(pool.total_amount).toFixed(2)}
+                              </ThemedText>
+                              {pool.participants_count !== undefined && pool.participants_count > 0 && (
+                                <ThemedText style={[styles.poolParticipants, { color: colors.textSecondary }]}>
+                                  {pool.participants_count} participante{pool.participants_count > 1 ? 's' : ''}
+                                </ThemedText>
+                              )}
+                            </View>
+                          </View>
+                        ))}
+                        {totalPoolsValue > 0 && (
+                          <View style={styles.totalValueContainer}>
+                            <ThemedText style={[styles.totalValueLabel, { color: colors.textSecondary }]}>
+                              Total em rateios
+                            </ThemedText>
+                            <ThemedText style={[styles.totalValue, { color: colors.text }]}>
+                              R$ {totalPoolsValue.toFixed(2)}
+                            </ThemedText>
+                          </View>
+                        )}
+                      </View>
+                    )}
+
+                    {/* Botões de ação */}
+                    <View style={styles.actionsContainer}>
+                      <TouchableOpacity
+                        style={[styles.primaryButton, { backgroundColor: colors.primary }]}
+                        activeOpacity={0.8}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          handleJoinGroup(group.id);
+                        }}>
+                        <ThemedText style={styles.primaryButtonText}>Entrar no grupo</ThemedText>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.secondaryButton, { borderColor: colors.primary }]}
+                        activeOpacity={0.7}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          router.push(`/group/${group.id}`);
+                        }}>
+                        <ThemedText style={[styles.secondaryButtonText, { color: colors.primary }]}>
+                          Ver detalhes
+                        </ThemedText>
+                      </TouchableOpacity>
                     </View>
                   </View>
-                  <View style={[styles.categoryTag, { backgroundColor: rateio.color + '15' }]}>
-                    <ThemedText style={[styles.categoryText, { color: rateio.color }]}>
-                      {rateio.category}
-                    </ThemedText>
-                  </View>
-                </View>
-
-                {/* Criador */}
-                <View style={styles.creatorInfo}>
-                  <View style={[styles.avatar, { backgroundColor: colors.borderLight }]}>
-                    <ThemedText style={styles.avatarText}>{rateio.creator.avatar}</ThemedText>
-                  </View>
-                  <ThemedText style={[styles.creatorName, { color: colors.textSecondary }]}>
-                    por {rateio.creator.name}
-                  </ThemedText>
-                  {rateio.friendsCount > 0 && (
-                    <View style={styles.friendsBadge}>
-                      <ThemedText style={[styles.friendsText, { color: colors.primary }]}>
-                        +{rateio.friendsCount} amigos aqui
-                      </ThemedText>
-                    </View>
-                  )}
-                </View>
-
-                {/* Valores */}
-                <View style={styles.valuesContainer}>
-                  <View>
-                    <ThemedText style={[styles.valueLabel, { color: colors.textSecondary }]}>
-                      Total
-                    </ThemedText>
-                    <ThemedText style={[styles.totalValue, { color: colors.text }]}>
-                      R$ {rateio.totalValue.toFixed(2)}
-                    </ThemedText>
-                  </View>
-                  <View style={styles.divider} />
-                  <View>
-                    <ThemedText style={[styles.valueLabel, { color: colors.textSecondary }]}>
-                      Por pessoa
-                    </ThemedText>
-                    <ThemedText style={[styles.perPersonValue, { color: colors.primary }]}>
-                      R$ {rateio.valuePerPerson.toFixed(2)}
-                    </ThemedText>
-                  </View>
-                  <View style={styles.divider} />
-                  <View>
-                    <ThemedText style={[styles.valueLabel, { color: colors.textSecondary }]}>
-                      {rateio.participants} pessoas
-                    </ThemedText>
-                    <ThemedText style={[styles.participantsValue, { color: colors.text }]}>
-                      {rateio.progress}% preenchido
-                    </ThemedText>
-                  </View>
-                </View>
-
-                {/* Barra de progresso */}
-                <View style={styles.progressContainer}>
-                  <View style={[styles.progressBar, { backgroundColor: colors.borderLight }]}>
-                    <Animated.View
-                      style={[
-                        styles.progressFill,
-                        {
-                          width: `${rateio.progress}%`,
-                          backgroundColor: rateio.color,
-                        },
-                      ]}
-                    />
-                  </View>
-                </View>
-
-                {/* Tempo restante */}
-                <View style={styles.timeContainer}>
-                  <MaterialIcons name="access-time" size={16} color={colors.textSecondary} />
-                  <ThemedText style={[styles.timeText, { color: colors.textSecondary }]}>
-                    {rateio.timeLeft}
-                  </ThemedText>
-                </View>
-
-                {/* Botões de ação */}
-                <View style={styles.actionsContainer}>
-                  <TouchableOpacity
-                    style={[styles.primaryButton, { backgroundColor: colors.primary }]}
-                    activeOpacity={0.8}>
-                    <ThemedText style={styles.primaryButtonText}>Participar</ThemedText>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.secondaryButton, { borderColor: colors.primary }]}
-                    activeOpacity={0.7}>
-                    <ThemedText style={[styles.secondaryButtonText, { color: colors.primary }]}>
-                      Ver grupo
-                    </ThemedText>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Seção de Sugestões */}
-        <View style={styles.suggestionsSection}>
-          <ThemedText style={[styles.suggestionsTitle, { color: colors.text }]}>
-            Talvez você curta esses grupos 👇
-          </ThemedText>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.suggestionsContainer}>
-            {suggestedGroups.map((group) => (
-              <TouchableOpacity
-                key={group.id}
-                activeOpacity={0.8}
-                style={[
-                  styles.groupCard,
-                  {
-                    backgroundColor: colors.surface,
-                    borderColor: colors.border,
-                    shadowColor: group.color + '15',
-                  },
-                ]}>
-                <View style={[styles.groupCover, { backgroundColor: group.color + '15' }]}>
-                  <ThemedText style={styles.groupEmoji}>{group.emoji}</ThemedText>
-                </View>
-                <View style={styles.groupCardContent}>
-                  <ThemedText type="defaultSemiBold" style={[styles.groupCardName, { color: colors.text }]}>
-                    {group.name}
-                  </ThemedText>
-                  <ThemedText style={[styles.groupMembers, { color: colors.textSecondary }]}>
-                    {group.members} membros
-                  </ThemedText>
-                  <TouchableOpacity
-                    style={[styles.joinButton, { backgroundColor: group.color }]}
-                    activeOpacity={0.8}>
-                    <ThemedText style={styles.joinButtonText}>Entrar</ThemedText>
-                  </TouchableOpacity>
-                </View>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        </View>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
       </Animated.ScrollView>
     </SafeAreaView>
   );
@@ -416,13 +542,43 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  rateiosContainer: {
+  loadingContainer: {
+    paddingVertical: 60,
+    alignItems: 'center',
+    gap: 16,
+  },
+  loadingText: {
+    fontSize: 16,
+  },
+  emptyState: {
+    paddingVertical: 60,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+  },
+  emptyEmoji: {
+    fontSize: 64,
+    marginBottom: 20,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    fontSize: 15,
+    fontWeight: '400',
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  groupsContainer: {
     paddingHorizontal: 20,
     paddingBottom: 24,
     gap: 20,
   },
-  rateioCard: {
+  groupCard: {
     borderRadius: 24,
+    borderWidth: 1.5,
     overflow: 'hidden',
     shadowOffset: {
       width: 0,
@@ -432,132 +588,119 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
     elevation: 4,
   },
-  coverImage: {
+  groupCover: {
     width: '100%',
-    height: 160,
+    height: 180,
     justifyContent: 'center',
     alignItems: 'center',
+    overflow: 'hidden',
   },
-  coverEmoji: {
+  groupCoverImage: {
+    width: '100%',
+    height: '100%',
+  },
+  groupCoverEmoji: {
     fontSize: 64,
   },
   cardContent: {
     padding: 20,
   },
   cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
     marginBottom: 12,
   },
   cardHeaderLeft: {
     flex: 1,
   },
-  rateioName: {
-    fontSize: 20,
+  groupName: {
+    fontSize: 22,
     fontWeight: '700',
-    marginBottom: 6,
+    marginBottom: 8,
   },
-  groupInfo: {
+  groupDescription: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 4,
+  },
+  groupMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 16,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  metaItem: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
   },
-  groupName: {
+  metaText: {
     fontSize: 13,
     fontWeight: '500',
   },
-  categoryTag: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
+  poolsOverview: {
+    marginBottom: 16,
+    padding: 16,
+    backgroundColor: '#F8FAFF',
+    borderRadius: 16,
+    gap: 12,
   },
-  categoryText: {
-    fontSize: 12,
-    fontWeight: '600',
+  overviewTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 4,
   },
-  creatorInfo: {
+  poolItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  poolItemLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 16,
+    flex: 1,
   },
-  avatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
+  poolStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
-  avatarText: {
-    fontSize: 18,
-  },
-  creatorName: {
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  friendsBadge: {
-    marginLeft: 'auto',
-  },
-  friendsText: {
-    fontSize: 12,
+  poolTitle: {
+    fontSize: 14,
     fontWeight: '600',
+    flex: 1,
   },
-  valuesContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-    paddingVertical: 16,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: '#F1F5F9',
+  poolItemRight: {
+    alignItems: 'flex-end',
   },
-  valueLabel: {
+  poolAmount: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  poolParticipants: {
     fontSize: 11,
     fontWeight: '500',
-    marginBottom: 4,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    marginTop: 2,
+  },
+  totalValueContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  totalValueLabel: {
+    fontSize: 13,
+    fontWeight: '600',
   },
   totalValue: {
     fontSize: 18,
     fontWeight: '700',
-  },
-  divider: {
-    width: 1,
-    height: 40,
-    backgroundColor: '#F1F5F9',
-    marginHorizontal: 16,
-  },
-  perPersonValue: {
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  participantsValue: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  progressContainer: {
-    marginBottom: 12,
-  },
-  progressBar: {
-    height: 8,
-    borderRadius: 4,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  timeContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 16,
-  },
-  timeText: {
-    fontSize: 13,
-    fontWeight: '500',
   },
   actionsContainer: {
     flexDirection: 'row',
@@ -591,63 +734,6 @@ const styles = StyleSheet.create({
   },
   secondaryButtonText: {
     fontSize: 15,
-    fontWeight: '600',
-  },
-  suggestionsSection: {
-    paddingHorizontal: 20,
-    paddingBottom: 32,
-  },
-  suggestionsTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 16,
-  },
-  suggestionsContainer: {
-    gap: 16,
-  },
-  groupCard: {
-    width: 200,
-    borderRadius: 20,
-    borderWidth: 1,
-    overflow: 'hidden',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 1,
-    shadowRadius: 12,
-    elevation: 3,
-  },
-  groupCover: {
-    width: '100%',
-    height: 120,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  groupEmoji: {
-    fontSize: 48,
-  },
-  groupCardContent: {
-    padding: 16,
-  },
-  groupCardName: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  groupMembers: {
-    fontSize: 13,
-    fontWeight: '500',
-    marginBottom: 12,
-  },
-  joinButton: {
-    paddingVertical: 10,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  joinButtonText: {
-    color: '#FFFFFF',
-    fontSize: 14,
     fontWeight: '600',
   },
 });

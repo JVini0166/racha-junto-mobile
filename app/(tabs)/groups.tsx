@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   ScrollView,
   StyleSheet,
@@ -10,51 +10,92 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { Image } from 'expo-image';
+import { router } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useAuth } from '@/contexts/AuthContext';
+import { supabase } from '@/utils/supabase';
+
+interface Group {
+  id: number;
+  name: string;
+  description: string | null;
+  visibility: 'public' | 'private';
+  owner_id: string;
+  image_url: string | null;
+  created_at: string;
+}
 
 export default function GroupsScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<'meus' | 'explorar'>('meus');
   const [refreshing, setRefreshing] = useState(false);
+  const [meusGrupos, setMeusGrupos] = useState<Group[]>([]);
+  const [loading, setLoading] = useState(true);
   const scrollY = useRef(new Animated.Value(0)).current;
 
-  // Dados mockados - Meus Grupos
-  const meusGrupos = [
-    {
-      id: 1,
-      name: 'Amigos do Trampo',
-      members: 12,
-      activeRateios: 3,
-      type: 'public',
-      coverEmoji: '💼',
-      hasNewMessages: true,
-      color: colors.primary,
-    },
-    {
-      id: 2,
-      name: 'Família',
-      members: 8,
-      activeRateios: 1,
-      type: 'private',
-      coverEmoji: '👨‍👩‍👧‍👦',
-      hasNewMessages: false,
-      color: colors.secondary,
-    },
-    {
-      id: 3,
-      name: 'Viagens Baratas',
-      members: 45,
-      activeRateios: 5,
-      type: 'public',
-      coverEmoji: '✈️',
-      hasNewMessages: true,
-      color: colors.teal,
-    },
-  ];
+  // Função para buscar os grupos do usuário
+  const loadMyGroups = useCallback(async () => {
+    if (!user?.id) {
+      setMeusGrupos([]);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from('groups')
+        .select('*')
+        .eq('owner_id', user.id)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Erro ao carregar grupos:', error);
+        setMeusGrupos([]);
+      } else {
+        setMeusGrupos(data || []);
+      }
+    } catch (error) {
+      console.error('Erro ao carregar grupos:', error);
+      setMeusGrupos([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.id]);
+
+  // Carrega os grupos quando o componente monta ou quando o usuário muda
+  useEffect(() => {
+    loadMyGroups();
+  }, [loadMyGroups]);
+
+  // Carrega os grupos automaticamente quando a tela ganha foco
+  useFocusEffect(
+    useCallback(() => {
+      loadMyGroups();
+    }, [loadMyGroups])
+  );
+
+  // Função auxiliar para obter cor baseada no ID do grupo
+  const getGroupColor = (groupId: number) => {
+    const colorsList = [
+      colors.primary,
+      colors.secondary,
+      colors.teal,
+      colors.purple,
+      colors.orange,
+      colors.pink,
+      colors.cyan,
+      colors.accent,
+    ];
+    return colorsList[groupId % colorsList.length];
+  };
 
   // Dados mockados - Explorar
   const gruposDestaque = [
@@ -113,11 +154,10 @@ export default function GroupsScreen() {
     },
   ];
 
-  const onRefresh = () => {
+  const onRefresh = async () => {
     setRefreshing(true);
-    setTimeout(() => {
-      setRefreshing(false);
-    }, 1500);
+    await loadMyGroups();
+    setRefreshing(false);
   };
 
   const searchBarOpacity = scrollY.interpolate({
@@ -135,14 +175,15 @@ export default function GroupsScreen() {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
       {/* Header */}
-      <View style={[styles.header, { backgroundColor: colors.surface, shadowColor: colors.shadow }]}>
+      <View style={[styles.header, { backgroundColor: colors.primary, shadowColor: colors.shadow }]}>
         <View style={styles.headerContent}>
-          <ThemedText type="title" style={[styles.headerTitle, { color: colors.text }]}>
+          <ThemedText type="title" style={[styles.headerTitle, { color: '#FFFFFF' }]}>
             Grupos
           </ThemedText>
           <TouchableOpacity
-            style={[styles.createButton, { backgroundColor: colors.primary }]}
-            activeOpacity={0.8}>
+            style={[styles.createButton, { backgroundColor: 'rgba(255, 255, 255, 0.2)' }]}
+            activeOpacity={0.8}
+            onPress={() => router.push('/(tabs)/create')}>
             <MaterialIcons name="add" size={20} color="#FFFFFF" />
             <ThemedText style={styles.createButtonText}>Criar</ThemedText>
           </TouchableOpacity>
@@ -157,12 +198,12 @@ export default function GroupsScreen() {
               height: searchBarHeight,
             },
           ]}>
-          <View style={[styles.searchBox, { backgroundColor: colors.borderLight, borderColor: colors.border }]}>
-            <MaterialIcons name="search" size={20} color={colors.textSecondary} />
+          <View style={[styles.searchBox, { backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: 'rgba(255, 255, 255, 0.3)' }]}>
+            <MaterialIcons name="search" size={20} color="rgba(255, 255, 255, 0.8)" />
             <TextInput
-              style={[styles.searchInput, { color: colors.text }]}
+              style={[styles.searchInput, { color: '#FFFFFF' }]}
               placeholder="Buscar grupos ou interesses…"
-              placeholderTextColor={colors.textSecondary}
+              placeholderTextColor="rgba(255, 255, 255, 0.7)"
             />
           </View>
         </Animated.View>
@@ -226,73 +267,87 @@ export default function GroupsScreen() {
             </View>
 
             {/* Lista de grupos */}
-            {meusGrupos.length > 0 ? (
+            {loading ? (
+              <View style={styles.emptyState}>
+                <ThemedText style={[styles.emptyTitle, { color: colors.text }]}>Carregando...</ThemedText>
+              </View>
+            ) : meusGrupos.length > 0 ? (
               <View style={styles.groupsList}>
-                {meusGrupos.map((grupo, index) => (
-                  <TouchableOpacity
-                    key={grupo.id}
-                    activeOpacity={0.8}
-                    style={[
-                      styles.groupCard,
-                      {
-                        backgroundColor: colors.surface,
-                        borderColor: colors.border,
-                        shadowColor: grupo.color + '15',
-                      },
-                    ]}>
-                    {/* Foto de capa */}
-                    <View style={[styles.groupCover, { backgroundColor: grupo.color + '15' }]}>
-                      <ThemedText style={styles.groupCoverEmoji}>{grupo.coverEmoji}</ThemedText>
-                    </View>
-
-                    <View style={styles.groupCardContent}>
-                      <View style={styles.groupHeader}>
-                        <View style={styles.groupInfo}>
-                          <ThemedText type="defaultSemiBold" style={[styles.groupName, { color: colors.text }]}>
-                            {grupo.name}
+                {meusGrupos.map((grupo) => {
+                  const groupColor = getGroupColor(grupo.id);
+                  return (
+                    <TouchableOpacity
+                      key={grupo.id}
+                      activeOpacity={0.8}
+                      style={[
+                        styles.groupCard,
+                        {
+                          backgroundColor: colors.surface,
+                          borderColor: colors.border,
+                          shadowColor: groupColor + '15',
+                        },
+                      ]}>
+                      {/* Foto de capa */}
+                      <View style={[styles.groupCover, { backgroundColor: groupColor + '15' }]}>
+                        {grupo.image_url ? (
+                          <Image
+                            source={{ uri: grupo.image_url }}
+                            style={styles.groupCoverImage}
+                            contentFit="cover"
+                          />
+                        ) : (
+                          <ThemedText style={styles.groupCoverEmoji}>
+                            {grupo.name.charAt(0).toUpperCase()}
                           </ThemedText>
-                          <View style={styles.groupMeta}>
-                            <ThemedText style={[styles.groupMetaText, { color: colors.textSecondary }]}>
-                              {grupo.members} membros
-                            </ThemedText>
-                            <View style={styles.metaDot} />
-                            <ThemedText style={[styles.groupMetaText, { color: colors.textSecondary }]}>
-                              {grupo.activeRateios} rateios ativos
-                            </ThemedText>
-                          </View>
-                        </View>
-                        {grupo.hasNewMessages && (
-                          <View style={[styles.chatBadge, { backgroundColor: colors.primary }]}>
-                            <MaterialIcons name="chat" size={14} color="#FFFFFF" />
-                          </View>
                         )}
                       </View>
+
+                      <View style={styles.groupCardContent}>
+                        <View style={styles.groupHeader}>
+                          <View style={styles.groupInfo}>
+                            <ThemedText type="defaultSemiBold" style={[styles.groupName, { color: colors.text }]}>
+                              {grupo.name}
+                            </ThemedText>
+                            {grupo.description && (
+                              <ThemedText style={[styles.groupDescription, { color: colors.textSecondary }]}>
+                                {grupo.description}
+                              </ThemedText>
+                            )}
+                            <View style={styles.groupMeta}>
+                              <ThemedText style={[styles.groupMetaText, { color: colors.textSecondary }]}>
+                                Criado em {new Date(grupo.created_at).toLocaleDateString('pt-BR')}
+                              </ThemedText>
+                            </View>
+                          </View>
+                        </View>
 
                       <View style={styles.groupFooter}>
                         <View
                           style={[
                             styles.typeTag,
                             {
-                              backgroundColor: grupo.type === 'public' ? '#2ECC71' + '15' : '#F39C12' + '15',
+                              backgroundColor: grupo.visibility === 'public' ? '#2ECC71' + '15' : '#F39C12' + '15',
                             },
                           ]}>
                           <ThemedText
                             style={[
                               styles.typeTagText,
-                              { color: grupo.type === 'public' ? '#2ECC71' : '#F39C12' },
+                              { color: grupo.visibility === 'public' ? '#2ECC71' : '#F39C12' },
                             ]}>
-                            {grupo.type === 'public' ? 'Público' : 'Privado'}
+                            {grupo.visibility === 'public' ? 'Público' : 'Privado'}
                           </ThemedText>
                         </View>
                         <TouchableOpacity
                           style={[styles.actionButton, { backgroundColor: colors.primary }]}
-                          activeOpacity={0.8}>
+                          activeOpacity={0.8}
+                          onPress={() => router.push(`/group/${grupo.id}`)}>
                           <ThemedText style={styles.actionButtonText}>Abrir</ThemedText>
                         </TouchableOpacity>
                       </View>
-                    </View>
-                  </TouchableOpacity>
-                ))}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
             ) : (
               <View style={styles.emptyState}>
@@ -306,7 +361,8 @@ export default function GroupsScreen() {
                 <View style={styles.emptyActions}>
                   <TouchableOpacity
                     style={[styles.emptyButton, { backgroundColor: colors.primary }]}
-                    activeOpacity={0.8}>
+                    activeOpacity={0.8}
+                    onPress={() => router.push('/(tabs)/create')}>
                     <ThemedText style={styles.emptyButtonText}>Criar grupo</ThemedText>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -550,7 +606,7 @@ const styles = StyleSheet.create({
   },
   groupCard: {
     borderRadius: 20,
-    borderWidth: 1,
+    borderWidth: 1.5,
     overflow: 'hidden',
     shadowOffset: {
       width: 0,
@@ -565,6 +621,11 @@ const styles = StyleSheet.create({
     height: 120,
     justifyContent: 'center',
     alignItems: 'center',
+    overflow: 'hidden',
+  },
+  groupCoverImage: {
+    width: '100%',
+    height: '100%',
   },
   groupCoverEmoji: {
     fontSize: 48,

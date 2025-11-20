@@ -8,6 +8,7 @@ import {
   Modal,
   Animated,
   RefreshControl,
+  Text,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
@@ -108,11 +109,8 @@ export default function WalletScreen() {
     extrapolate: 'clamp',
   });
 
-  const headerHeight = scrollY.interpolate({
-    inputRange: [0, 100],
-    outputRange: [80, 60],
-    extrapolate: 'clamp',
-  });
+  // Altura fixa para manter o mesmo tamanho durante o scroll
+  const headerHeight = 70;
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
@@ -121,18 +119,18 @@ export default function WalletScreen() {
         style={[
           styles.header,
           {
-            backgroundColor: colors.surface,
+            backgroundColor: colors.primary,
             height: headerHeight,
             opacity: headerOpacity,
             shadowColor: colors.shadow,
           },
         ]}>
         <View style={styles.headerContent}>
-          <ThemedText type="title" style={[styles.headerTitle, { color: colors.text }]}>
+          <ThemedText type="title" style={[styles.headerTitle, { color: '#FFFFFF' }]}>
             Minha Carteira
           </ThemedText>
           <TouchableOpacity style={styles.historyButton} activeOpacity={0.7}>
-            <MaterialIcons name="history" size={24} color={colors.text} />
+            <MaterialIcons name="history" size={24} color="#FFFFFF" />
           </TouchableOpacity>
         </View>
       </Animated.View>
@@ -159,7 +157,15 @@ export default function WalletScreen() {
               <MaterialIcons name="account-balance-wallet" size={24} color="#FFFFFF" />
               <ThemedText style={styles.balanceLabel}>Saldo disponível</ThemedText>
             </View>
-            <ThemedText style={styles.balanceAmount}>R$ {walletData.saldo.toFixed(2)}</ThemedText>
+            <View style={styles.balanceAmountContainer}>
+              <Text 
+                style={styles.balanceAmount} 
+                numberOfLines={1} 
+                adjustsFontSizeToFit 
+                minimumFontScale={0.5}>
+                R$ {walletData.saldo.toFixed(2)}
+              </Text>
+            </View>
             <ThemedText style={styles.balanceSubtitle}>Saldo liberado para saque</ThemedText>
 
             <View style={styles.balanceActions}>
@@ -273,6 +279,7 @@ export default function WalletScreen() {
                 styles.transactionItem,
                 {
                   backgroundColor: colors.surface,
+                  borderColor: colors.border,
                   borderLeftColor: transaction.color,
                   shadowColor: colors.shadow,
                 },
@@ -448,10 +455,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 20,
     paddingBottom: 24,
+    overflow: 'visible',
   },
   balanceCard: {
     borderRadius: 24,
     padding: 24,
+    paddingHorizontal: 28,
+    paddingRight: 32,
+    overflow: 'visible',
     shadowOffset: {
       width: 0,
       height: 8,
@@ -472,12 +483,19 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     opacity: 0.9,
   },
+  balanceAmountContainer: {
+    width: '100%',
+    marginBottom: 8,
+    overflow: 'visible',
+  },
   balanceAmount: {
     fontSize: 48,
     fontWeight: '800',
     color: '#FFFFFF',
-    letterSpacing: -1.5,
-    marginBottom: 8,
+    letterSpacing: -1,
+    includeFontPadding: false,
+    textAlign: 'left',
+    flexWrap: 'nowrap',
   },
   balanceSubtitle: {
     fontSize: 13,
@@ -528,7 +546,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 16,
     borderRadius: 16,
-    borderWidth: 1,
+    borderWidth: 1.5,
     marginBottom: 12,
     shadowOffset: {
       width: 0,
@@ -577,8 +595,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 16,
     borderRadius: 16,
+    borderWidth: 1.5,
     borderLeftWidth: 4,
-    borderWidth: 0,
     marginBottom: 12,
     shadowOffset: {
       width: 0,

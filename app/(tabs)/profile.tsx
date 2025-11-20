@@ -1,40 +1,134 @@
-import { useState, useRef } from 'react';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { Image } from 'expo-image';
+import * as ImagePicker from 'expo-image-picker';
+import { router } from 'expo-router';
+import { useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  RefreshControl,
   ScrollView,
   StyleSheet,
-  View,
-  TouchableOpacity,
   TextInput,
-  Modal,
-  Animated,
-  RefreshControl,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 import { ThemedText } from '@/components/themed-text';
 import { Colors } from '@/constants/theme';
+import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
+import { supabase } from '@/utils/supabase';
 
 export default function ProfileScreen() {
   const { theme, setTheme, colorScheme } = useTheme();
+  const { profile, user } = useAuth();
   const colors = Colors[colorScheme ?? 'light'];
   const isDarkMode = colorScheme === 'dark';
   const [refreshing, setRefreshing] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
   const scrollY = useRef(new Animated.Value(0)).current;
 
-  // Dados do usuário
-  const [userData, setUserData] = useState({
-    name: 'José Vinícius',
-    username: '@ze_rachajunto',
-    bio: 'Apaixonado por churrascos e viagens — sempre rachando o melhor rolê 😎',
-    avatar: '👨',
-    interests: ['Viagens', 'Festas'],
-  });
+  // Dados do usuário do perfil ou valores padrão
+  const defaultUserData = {
+    name: profile?.name || user?.email?.split('@')[0] || 'Usuário',
+    username: profile?.username || `@${user?.email?.split('@')[0] || 'usuario'}`,
+    bio: profile?.bio || 'Nenhuma biografia ainda',
+    avatar: profile?.avatar_url || '👤',
+    interests: ['Viagens', 'Festas'], // TODO: Adicionar campo de interesses no perfil
+  };
 
-  const [editData, setEditData] = useState(userData);
+  const [userData, setUserData] = useState(defaultUserData);
+  const [editData, setEditData] = useState(defaultUserData);
+
+  // Função para recuperar a imagem do storage usando o ID do usuário
+  const loadAvatarFromStorage = async (userId: string) => {
+    try {
+      // Lista todos os arquivos no bucket para encontrar o que corresponde ao userId
+      const { data: files, error: listError } = await supabase.storage
+        .from('profile-images')
+        .list('', {
+          search: userId,
+        });
+
+      if (!listError && files && files.length > 0) {
+        // Procura o arquivo que corresponde ao padrão {userId}.{ext}
+        const matchingFile = files.find(file => 
+          file.name.startsWith(`${userId}.`) || file.name === userId
+        );
+
+        if (matchingFile) {
+          // Se encontrou o arquivo, constrói a URL pública
+          const { data: { publicUrl } } = supabase.storage
+            .from('profile-images')
+            .getPublicUrl(matchingFile.name);
+          return publicUrl;
+        }
+      }
+
+      // Se não encontrou listando, tenta construir URLs diretas para extensões comuns
+      const extensions = ['jpg', 'jpeg', 'png', 'webp'];
+      for (const ext of extensions) {
+        const filePath = `${userId}.${ext}`;
+        const { data: { publicUrl } } = supabase.storage
+          .from('profile-images')
+          .getPublicUrl(filePath);
+        
+        // Verifica se a URL é acessível fazendo uma requisição HEAD
+        try {
+          const response = await fetch(publicUrl, { method: 'HEAD' });
+          if (response.ok) {
+            return publicUrl;
+          }
+        } catch {
+          // Se falhar, continua tentando outras extensões
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Erro ao buscar imagem do storage:', error);
+      return null;
+    }
+  };
+
+  // Atualiza userData e editData quando o perfil mudar e recupera imagem do storage
+  useEffect(() => {
+    const loadAvatar = async () => {
+      let avatarUrl = profile?.avatar_url || null;
+
+      // Se não há avatar_url no perfil ou não é uma URL válida, tenta buscar no storage
+      if (!avatarUrl || !avatarUrl.startsWith('http')) {
+        if (user?.id) {
+          const storageUrl = await loadAvatarFromStorage(user.id);
+          if (storageUrl) {
+            avatarUrl = storageUrl;
+          }
+        }
+      }
+
+      const newUserData = {
+        name: profile?.name || user?.email?.split('@')[0] || 'Usuário',
+        username: profile?.username || `@${user?.email?.split('@')[0] || 'usuario'}`,
+        bio: profile?.bio || 'Nenhuma biografia ainda',
+        avatar: avatarUrl || '👤',
+        interests: ['Viagens', 'Festas'],
+      };
+      setUserData(newUserData);
+      setEditData(newUserData);
+    };
+
+    if (user?.id) {
+      loadAvatar();
+    }
+  }, [profile, user]);
 
   // Estatísticas
   const stats = {
@@ -79,24 +173,221 @@ export default function ProfileScreen() {
     },
   ];
 
-  const onRefresh = () => {
+  const onRefresh = async () => {
     setRefreshing(true);
-    setTimeout(() => {
+    try {
+      if (user?.id) {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', user.id)
+          .single();
+
+        if (!error && data) {
+          // Busca a imagem do storage
+          let avatarUrl = data.avatar_url || null;
+          if (!avatarUrl || !avatarUrl.startsWith('http')) {
+            const storageUrl = await loadAvatarFromStorage(user.id);
+            if (storageUrl) {
+              avatarUrl = storageUrl;
+            }
+          }
+
+          const refreshedData = {
+            name: data.name || user?.email?.split('@')[0] || 'Usuário',
+            username: data.username || `@${user?.email?.split('@')[0] || 'usuario'}`,
+            bio: data.bio || 'Nenhuma biografia ainda',
+            avatar: avatarUrl || '👤',
+            interests: ['Viagens', 'Festas'], // TODO: Adicionar campo de interesses
+          };
+          setUserData(refreshedData);
+          setEditData(refreshedData);
+        }
+      }
+    } catch (error) {
+      console.error('Erro ao atualizar perfil:', error);
+    } finally {
       setRefreshing(false);
-    }, 1500);
+    }
   };
 
-  const handleSaveProfile = () => {
-    setUserData(editData);
-    setShowEditModal(false);
-    setShowSuccessToast(true);
-    setTimeout(() => {
-      setShowSuccessToast(false);
-    }, 3000);
+  const uploadImage = async (uri: string) => {
+    if (!user?.id) {
+      Alert.alert('Erro', 'Usuário não encontrado');
+      return null;
+    }
+
+    try {
+      setUploadingImage(true);
+
+      // Lê o arquivo como arrayBuffer
+      const response = await fetch(uri);
+      if (!response.ok) {
+        throw new Error('Não foi possível ler a imagem');
+      }
+      const arrayBuffer = await response.arrayBuffer();
+
+      // Nome do arquivo usando o ID do usuário
+      const fileExt = uri.split('.').pop() || 'jpg';
+      const fileName = `${user.id}.${fileExt}`;
+      const filePath = `${fileName}`;
+
+      // Faz upload para o Supabase Storage
+      const { data, error: uploadError } = await supabase.storage
+        .from('profile-images')
+        .upload(filePath, arrayBuffer, {
+          contentType: `image/${fileExt}`,
+          upsert: true, // Substitui se já existir
+        });
+
+      if (uploadError) {
+        console.error('Erro no upload:', uploadError);
+        throw uploadError;
+      }
+
+      // Obtém a URL pública da imagem
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from('profile-images').getPublicUrl(filePath);
+
+      // Adiciona timestamp para forçar recarregamento (evita cache)
+      const urlWithTimestamp = `${publicUrl}?t=${Date.now()}`;
+
+      return urlWithTimestamp;
+    } catch (error: any) {
+      console.error('Erro ao fazer upload da imagem:', error);
+      Alert.alert('Erro no upload', error.message || 'Não foi possível fazer upload da imagem');
+      return null;
+    } finally {
+      setUploadingImage(false);
+    }
+  };
+
+  const handlePickImage = async () => {
+    try {
+      // Solicita permissão
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permissão necessária', 'Precisamos de permissão para acessar suas fotos');
+        return;
+      }
+
+      // Abre o seletor de imagem
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      console.log('Resultado do ImagePicker:', result);
+
+      if (result.canceled) {
+        // Usuário cancelou, não faz nada
+        return;
+      }
+
+      if (result.assets && result.assets.length > 0 && result.assets[0]) {
+        const imageUri = result.assets[0].uri;
+        if (imageUri) {
+          const imageUrl = await uploadImage(imageUri);
+
+          if (imageUrl) {
+            // Remove o timestamp da URL para salvar no banco (mantém apenas a URL base)
+            const baseUrl = imageUrl.split('?')[0];
+            
+            // Atualiza o estado imediatamente com a URL com timestamp (para recarregar)
+            setEditData({ ...editData, avatar: imageUrl });
+            setUserData({ ...userData, avatar: imageUrl });
+
+            // Atualiza o perfil no banco de dados com a nova URL
+            if (user?.id) {
+              const { error: updateError } = await supabase
+                .from('profiles')
+                .update({ avatar_url: baseUrl })
+                .eq('id', user.id);
+
+              if (updateError) {
+                console.error('Erro ao atualizar avatar_url no perfil:', updateError);
+              }
+            }
+
+            // Força recarregamento da imagem após um pequeno delay
+            setTimeout(() => {
+              setUserData(prev => ({ ...prev, avatar: `${baseUrl}?t=${Date.now()}` }));
+              setEditData(prev => ({ ...prev, avatar: `${baseUrl}?t=${Date.now()}` }));
+            }, 100);
+          }
+        } else {
+          Alert.alert('Erro', 'Não foi possível obter a URI da imagem');
+        }
+      } else {
+        Alert.alert('Erro', 'Nenhuma imagem foi selecionada');
+      }
+    } catch (error: any) {
+      console.error('Erro completo ao selecionar imagem:', error);
+      console.error('Stack trace:', error?.stack);
+      Alert.alert('Erro', error?.message || error?.toString() || 'Não foi possível selecionar a imagem');
+    }
+  };
+
+  const handleSaveProfile = async () => {
+    if (!user?.id) return;
+
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          name: editData.name,
+          username: editData.username,
+          bio: editData.bio,
+          avatar_url: editData.avatar.startsWith('http') ? editData.avatar : null,
+        })
+        .eq('id', user.id);
+
+      if (error) {
+        Alert.alert('Erro', 'Não foi possível salvar o perfil');
+        return;
+      }
+
+      setUserData(editData);
+      setShowEditModal(false);
+      setShowSuccessToast(true);
+      setTimeout(() => {
+        setShowSuccessToast(false);
+      }, 3000);
+    } catch (error) {
+      Alert.alert('Erro', 'Ocorreu um erro ao salvar o perfil');
+    }
   };
 
   const toggleTheme = () => {
     setTheme(isDarkMode ? 'light' : 'dark');
+  };
+
+  const handleLogout = async () => {
+    Alert.alert('Sair da conta', 'Tem certeza que deseja sair?', [
+      {
+        text: 'Cancelar',
+        style: 'cancel',
+      },
+      {
+        text: 'Sair',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const { error } = await supabase.auth.signOut();
+            if (error) {
+              Alert.alert('Erro', 'Não foi possível fazer logout');
+              return;
+            }
+            router.replace('/login');
+          } catch (error) {
+            Alert.alert('Erro', 'Ocorreu um erro ao fazer logout');
+          }
+        },
+      },
+    ]);
   };
 
   const headerOpacity = scrollY.interpolate({
@@ -120,18 +411,18 @@ export default function ProfileScreen() {
         style={[
           styles.header,
           {
-            backgroundColor: colors.surface,
+            backgroundColor: colors.primary,
             opacity: headerOpacity,
             shadowColor: colors.shadow,
           },
         ]}>
         <View style={styles.headerContent}>
           <View style={styles.headerSpacer} />
-          <ThemedText type="title" style={[styles.headerTitle, { color: colors.text }]}>
+          <ThemedText type="title" style={[styles.headerTitle, { color: '#FFFFFF' }]}>
             Meu Perfil
           </ThemedText>
           <TouchableOpacity style={styles.settingsButton} activeOpacity={0.7}>
-            <MaterialIcons name="settings" size={24} color={colors.text} />
+            <MaterialIcons name="settings" size={24} color="#FFFFFF" />
           </TouchableOpacity>
         </View>
       </Animated.View>
@@ -163,12 +454,27 @@ export default function ProfileScreen() {
                     transform: [{ scale: avatarScale }],
                   },
                 ]}>
-                <View style={[styles.avatar, { backgroundColor: colors.primary + '15' }]}>
-                  <ThemedText style={styles.avatarText}>{userData.avatar}</ThemedText>
-                </View>
+                <TouchableOpacity
+                  onPress={handlePickImage}
+                  activeOpacity={0.8}
+                  style={styles.avatarTouchable}>
+                  <View style={[styles.avatar, { backgroundColor: colors.primary + '15' }]}>
+                    {userData.avatar && userData.avatar.startsWith('http') ? (
+                      <Image
+                        source={{ uri: userData.avatar }}
+                        style={styles.avatarImage}
+                        contentFit="cover"
+                        transition={200}
+                      />
+                    ) : (
+                      <ThemedText style={styles.avatarText}>{userData.avatar}</ThemedText>
+                    )}
+                  </View>
+                </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.cameraButton, { backgroundColor: colors.primary }]}
-                  activeOpacity={0.8}>
+                  activeOpacity={0.8}
+                  onPress={handlePickImage}>
                   <MaterialIcons name="camera-alt" size={16} color="#FFFFFF" />
                 </TouchableOpacity>
               </Animated.View>
@@ -266,6 +572,7 @@ export default function ProfileScreen() {
                 styles.activityItem,
                 {
                   backgroundColor: colors.surface,
+                  borderColor: colors.border,
                   borderLeftColor: activity.color,
                   shadowColor: colors.shadow,
                 },
@@ -369,7 +676,7 @@ export default function ProfileScreen() {
           <TouchableOpacity
             style={[styles.logoutButton, { borderColor: colors.error + '30', backgroundColor: colors.error + '08' }]}
             activeOpacity={0.8}
-            onPress={() => {}}>
+            onPress={handleLogout}>
             <MaterialIcons name="exit-to-app" size={20} color={colors.error} />
             <ThemedText style={[styles.logoutButtonText, { color: colors.error }]}>Sair da conta</ThemedText>
           </TouchableOpacity>
@@ -379,7 +686,10 @@ export default function ProfileScreen() {
       {/* Modal de Editar Perfil */}
       <Modal visible={showEditModal} transparent animationType="slide">
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: colors.surface }]}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={{ flex: 1 }}>
+            <View style={[styles.modalContent, { backgroundColor: colors.surface }]}>
             <View style={styles.modalHeader}>
               <TouchableOpacity onPress={() => setShowEditModal(false)} activeOpacity={0.7}>
                 <MaterialIcons name="close" size={24} color={colors.text} />
@@ -388,19 +698,38 @@ export default function ProfileScreen() {
               <View style={styles.modalHeaderSpacer} />
             </View>
 
-            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
+            <ScrollView
+              style={styles.modalScroll}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled={true}>
               {/* Foto */}
               <View style={styles.modalPhotoSection}>
-                <View style={[styles.modalAvatar, { backgroundColor: colors.primary + '15' }]}>
-                  <ThemedText style={styles.modalAvatarText}>{editData.avatar}</ThemedText>
-                </View>
                 <TouchableOpacity
-                  style={[styles.modalCameraButton, { backgroundColor: colors.primary }]}
-                  activeOpacity={0.8}>
-                  <MaterialIcons name="camera-alt" size={18} color="#FFFFFF" />
+                  onPress={handlePickImage}
+                  disabled={uploadingImage}
+                  activeOpacity={0.8}
+                  style={styles.modalPhotoTouchable}>
+                  <View style={[styles.modalAvatar, { backgroundColor: colors.primary + '15' }]}>
+                    {uploadingImage ? (
+                      <ActivityIndicator color={colors.primary} size="large" />
+                    ) : editData.avatar && editData.avatar.startsWith('http') ? (
+                      <Image
+                        source={{ uri: editData.avatar }}
+                        style={styles.modalAvatarImage}
+                        contentFit="cover"
+                        transition={200}
+                      />
+                    ) : (
+                      <ThemedText style={styles.modalAvatarText}>{editData.avatar}</ThemedText>
+                    )}
+                  </View>
+                  <View style={[styles.modalCameraButton, { backgroundColor: colors.primary }]}>
+                    <MaterialIcons name="camera-alt" size={18} color="#FFFFFF" />
+                  </View>
                 </TouchableOpacity>
                 <ThemedText style={[styles.modalPhotoHint, { color: colors.textSecondary }]}>
-                  Toque para alterar foto
+                  {uploadingImage ? 'Fazendo upload...' : 'Toque para alterar foto'}
                 </ThemedText>
               </View>
 
@@ -459,8 +788,10 @@ export default function ProfileScreen() {
                   placeholder="Conte um pouco sobre você..."
                   placeholderTextColor={colors.textSecondary}
                   multiline
-                  numberOfLines={3}
+                  numberOfLines={4}
                   textAlignVertical="top"
+                  editable={true}
+                  selectTextOnFocus={false}
                 />
               </View>
 
@@ -518,6 +849,7 @@ export default function ProfileScreen() {
               </TouchableOpacity>
             </View>
           </View>
+          </KeyboardAvoidingView>
         </View>
       </Modal>
 
@@ -578,7 +910,7 @@ const styles = StyleSheet.create({
   identityCard: {
     borderRadius: 24,
     padding: 24,
-    borderWidth: 1,
+    borderWidth: 1.5,
     alignItems: 'center',
     shadowOffset: {
       width: 0,
@@ -594,12 +926,21 @@ const styles = StyleSheet.create({
   avatarWrapper: {
     position: 'relative',
   },
+  avatarTouchable: {
+    position: 'relative',
+  },
   avatar: {
     width: 120,
     height: 120,
     borderRadius: 60,
     justifyContent: 'center',
     alignItems: 'center',
+    overflow: 'hidden',
+  },
+  avatarImage: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
   },
   avatarText: {
     fontSize: 56,
@@ -620,6 +961,7 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: '700',
     marginBottom: 4,
+    textAlign: 'center',
   },
   userUsername: {
     fontSize: 15,
@@ -657,7 +999,7 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 16,
     borderRadius: 16,
-    borderWidth: 1,
+    borderWidth: 1.5,
     alignItems: 'center',
     shadowOffset: {
       width: 0,
@@ -699,8 +1041,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 16,
     borderRadius: 16,
+    borderWidth: 1.5,
     borderLeftWidth: 4,
-    borderWidth: 0,
     marginBottom: 12,
     shadowOffset: {
       width: 0,
@@ -838,6 +1180,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 12,
+    overflow: 'hidden',
+  },
+  modalAvatarImage: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
   },
   modalAvatarText: {
     fontSize: 48,
@@ -883,6 +1231,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '400',
     minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  modalPhotoTouchable: {
+    alignItems: 'center',
+    position: 'relative',
   },
   interestsContainer: {
     flexDirection: 'row',

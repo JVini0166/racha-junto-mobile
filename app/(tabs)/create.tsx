@@ -8,30 +8,36 @@ import {
   Modal,
   Animated,
   Dimensions,
+  Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import * as ImagePicker from 'expo-image-picker';
+import { Image } from 'expo-image';
+import { router } from 'expo-router';
 
 import { ThemedText } from '@/components/themed-text';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useAuth } from '@/contexts/AuthContext';
+import { supabase } from '@/utils/supabase';
 
 const { width } = Dimensions.get('window');
 
 export default function CreateScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
+  const { user } = useAuth();
   const [groupName, setGroupName] = useState('');
   const [description, setDescription] = useState('');
   const [groupType, setGroupType] = useState<'public' | 'private' | null>(null);
-  const [selectedInterests, setSelectedInterests] = useState<string[]>([]);
-  const [rules, setRules] = useState('');
+  const [groupImage, setGroupImage] = useState<string | null>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [errors, setErrors] = useState<{ name?: string; type?: string }>({});
   const confettiScale = useState(new Animated.Value(0))[0];
-
-  const interests = ['Viagens', 'Festas', 'Games', 'Compras', 'Eventos', 'Estudos', 'Outros'];
 
   const validateForm = () => {
     const newErrors: { name?: string; type?: string } = {};
@@ -50,16 +56,152 @@ export default function CreateScreen() {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleCreateGroup = () => {
+  const handlePickImage = async () => {
+    try {
+      // Solicita permissão
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permissão necessária', 'Precisamos de permissão para acessar suas fotos');
+        return;
+      }
+
+      // Abre o seletor de imagem
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      if (result.canceled) {
+        return;
+      }
+
+      if (result.assets && result.assets.length > 0 && result.assets[0]) {
+        const imageUri = result.assets[0].uri;
+        if (imageUri) {
+          setGroupImage(imageUri);
+        }
+      }
+    } catch (error: any) {
+      console.error('Erro ao selecionar imagem:', error);
+      Alert.alert('Erro', 'Não foi possível selecionar a imagem');
+    }
+  };
+
+  const uploadGroupImage = async (groupId: number, imageUri: string) => {
+    try {
+      setIsUploadingImage(true);
+
+      // Lê o arquivo como arrayBuffer
+      const response = await fetch(imageUri);
+      if (!response.ok) {
+        throw new Error('Não foi possível ler a imagem');
+      }
+      const arrayBuffer = await response.arrayBuffer();
+
+      // Nome do arquivo usando o ID do grupo
+      const fileExt = imageUri.split('.').pop() || 'jpg';
+      const fileName = `${groupId}.${fileExt}`;
+      const filePath = `${fileName}`;
+
+      // Faz upload para o Supabase Storage
+      const { data, error: uploadError } = await supabase.storage
+        .from('group-images')
+        .upload(filePath, arrayBuffer, {
+          contentType: `image/${fileExt}`,
+          upsert: true, // Substitui se já existir
+        });
+
+      if (uploadError) {
+        console.error('Erro no upload:', uploadError);
+        throw uploadError;
+      }
+
+      // Obtém a URL pública da imagem
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from('group-images').getPublicUrl(filePath);
+
+      return publicUrl;
+    } catch (error: any) {
+      console.error('Erro ao fazer upload da imagem:', error);
+      throw error;
+    } finally {
+      setIsUploadingImage(false);
+    }
+  };
+
+  const handleCreateGroup = async () => {
     if (!validateForm()) {
+      return;
+    }
+
+    if (!user?.id) {
+      Alert.alert('Erro', 'Usuário não encontrado');
       return;
     }
 
     setIsCreating(true);
 
-    // Simulação de criação
-    setTimeout(() => {
-      setIsCreating(false);
+    try {
+      // Cria o grupo no Supabase
+      const { data: groupData, error: groupError } = await supabase
+        .from('groups')
+        .insert({
+          name: groupName,
+          description: description || null,
+          visibility: groupType, // Mapeia groupType para visibility
+          owner_id: user.id,
+          image_url: null, // Será atualizado após o upload da imagem
+        })
+        .select()
+        .single();
+
+      if (groupError) {
+        console.error('Erro ao criar grupo:', groupError);
+        Alert.alert('Erro', 'Não foi possível criar o grupo');
+        setIsCreating(false);
+        return;
+      }
+
+      // Adiciona o criador como membro do grupo com role "owner"
+      if (groupData) {
+        const { error: memberError } = await supabase.from('group_members').insert({
+          group_id: groupData.id,
+          user_id: user.id,
+          role: 'owner',
+          active: true,
+        });
+
+        if (memberError) {
+          console.error('Erro ao adicionar membro ao grupo:', memberError);
+          // Não bloqueia a criação do grupo, mas loga o erro
+        }
+      }
+
+      // Se há uma imagem selecionada, faz upload
+      let imageUrl = null;
+      if (groupImage && groupData) {
+        try {
+          imageUrl = await uploadGroupImage(groupData.id, groupImage);
+
+          // Atualiza o grupo com a URL da imagem
+          const { error: updateError } = await supabase
+            .from('groups')
+            .update({ image_url: imageUrl })
+            .eq('id', groupData.id);
+
+          if (updateError) {
+            console.error('Erro ao atualizar imagem do grupo:', updateError);
+          }
+        } catch (uploadError) {
+          console.error('Erro ao fazer upload da imagem:', uploadError);
+          // Continua mesmo se o upload falhar
+        }
+      }
+
+      // Mostra modal de sucesso
       setShowSuccessModal(true);
       Animated.spring(confettiScale, {
         toValue: 1,
@@ -67,14 +209,17 @@ export default function CreateScreen() {
         tension: 50,
         friction: 7,
       }).start();
-    }, 1500);
-  };
 
-  const toggleInterest = (interest: string) => {
-    if (selectedInterests.includes(interest)) {
-      setSelectedInterests(selectedInterests.filter((i) => i !== interest));
-    } else if (selectedInterests.length < 3) {
-      setSelectedInterests([...selectedInterests, interest]);
+      // Limpa o formulário
+      setGroupName('');
+      setDescription('');
+      setGroupType(null);
+      setGroupImage(null);
+    } catch (error: any) {
+      console.error('Erro ao criar grupo:', error);
+      Alert.alert('Erro', 'Não foi possível criar o grupo');
+    } finally {
+      setIsCreating(false);
     }
   };
 
@@ -83,11 +228,14 @@ export default function CreateScreen() {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
       {/* Header */}
-      <View style={[styles.header, { backgroundColor: colors.surface, shadowColor: colors.shadow }]}>
-        <TouchableOpacity style={styles.backButton} activeOpacity={0.7}>
-          <MaterialIcons name="arrow-back" size={24} color={colors.text} />
+      <View style={[styles.header, { backgroundColor: colors.primary, shadowColor: colors.shadow }]}>
+        <TouchableOpacity
+          style={styles.backButton}
+          activeOpacity={0.7}
+          onPress={() => router.back()}>
+          <MaterialIcons name="arrow-back" size={24} color="#FFFFFF" />
         </TouchableOpacity>
-        <ThemedText type="title" style={[styles.headerTitle, { color: colors.text }]}>
+        <ThemedText type="title" style={[styles.headerTitle, { color: '#FFFFFF' }]}>
           Criar Grupo
         </ThemedText>
         <View style={styles.backButton} />
@@ -101,11 +249,21 @@ export default function CreateScreen() {
         <View style={styles.photoSection}>
           <TouchableOpacity
             style={[styles.photoContainer, { backgroundColor: colors.borderLight, borderColor: colors.border }]}
-            activeOpacity={0.8}>
-            <MaterialIcons name="camera-alt" size={32} color={colors.textSecondary} />
-            <ThemedText style={[styles.photoText, { color: colors.textSecondary }]}>
-              Adicionar foto do grupo
-            </ThemedText>
+            activeOpacity={0.8}
+            onPress={handlePickImage}
+            disabled={isUploadingImage}>
+            {isUploadingImage ? (
+              <ActivityIndicator size="large" color={colors.primary} />
+            ) : groupImage ? (
+              <Image source={{ uri: groupImage }} style={styles.photoImage} contentFit="cover" />
+            ) : (
+              <>
+                <MaterialIcons name="camera-alt" size={32} color={colors.textSecondary} />
+                <ThemedText style={[styles.photoText, { color: colors.textSecondary }]}>
+                  Adicionar foto do grupo
+                </ThemedText>
+              </>
+            )}
           </TouchableOpacity>
         </View>
 
@@ -258,71 +416,6 @@ export default function CreateScreen() {
           )}
         </View>
 
-        {/* Interesses */}
-        <View style={styles.fieldContainer}>
-          <ThemedText style={[styles.fieldLabel, { color: colors.text }]}>
-            Escolha os temas do grupo
-          </ThemedText>
-          <ThemedText style={[styles.fieldHint, { color: colors.textSecondary }]}>
-            Selecione até 3 interesses
-          </ThemedText>
-          <View style={styles.interestsContainer}>
-            {interests.map((interest) => {
-              const isSelected = selectedInterests.includes(interest);
-              return (
-                <TouchableOpacity
-                  key={interest}
-                  activeOpacity={0.7}
-                  onPress={() => toggleInterest(interest)}
-                  disabled={!isSelected && selectedInterests.length >= 3}
-                  style={[
-                    styles.interestChip,
-                    {
-                      backgroundColor: isSelected ? colors.primary : colors.surface,
-                      borderColor: isSelected ? colors.primary : colors.border,
-                      opacity: !isSelected && selectedInterests.length >= 3 ? 0.5 : 1,
-                    },
-                  ]}>
-                  <ThemedText
-                    style={[
-                      styles.interestText,
-                      { color: isSelected ? '#FFFFFF' : colors.text },
-                    ]}>
-                    {interest}
-                  </ThemedText>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-
-        {/* Regras (opcional) */}
-        <View style={styles.fieldContainer}>
-          <ThemedText style={[styles.fieldLabel, { color: colors.text }]}>
-            Regras (opcional)
-          </ThemedText>
-          <ThemedText style={[styles.fieldHint, { color: colors.textSecondary }]}>
-            Quer definir alguma regra para os membros?
-          </ThemedText>
-          <TextInput
-            style={[
-              styles.textArea,
-              {
-                backgroundColor: colors.surface,
-                borderColor: colors.border,
-                color: colors.text,
-              },
-            ]}
-            placeholder="Ex: Evitar spam, respeitar todos os participantes"
-            placeholderTextColor={colors.textSecondary}
-            value={rules}
-            onChangeText={setRules}
-            multiline
-            numberOfLines={3}
-            textAlignVertical="top"
-          />
-        </View>
-
         {/* Espaço para o botão fixo */}
         <View style={styles.bottomSpacer} />
       </ScrollView>
@@ -341,7 +434,10 @@ export default function CreateScreen() {
           disabled={!isFormValid || isCreating}
           activeOpacity={0.8}>
           {isCreating ? (
-            <ThemedText style={styles.createButtonText}>Criando...</ThemedText>
+            <View style={styles.buttonContent}>
+              <ActivityIndicator size="small" color="#FFFFFF" style={styles.buttonLoader} />
+              <ThemedText style={styles.createButtonText}>Criando...</ThemedText>
+            </View>
           ) : (
             <ThemedText style={styles.createButtonText}>Criar grupo</ThemedText>
           )}
@@ -371,13 +467,19 @@ export default function CreateScreen() {
               <TouchableOpacity
                 style={[styles.modalButton, { backgroundColor: colors.primary }]}
                 activeOpacity={0.8}
-                onPress={() => setShowSuccessModal(false)}>
+                onPress={() => {
+                  setShowSuccessModal(false);
+                  router.back();
+                }}>
                 <ThemedText style={styles.modalButtonText}>Ver grupo</ThemedText>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.modalButtonSecondary, { borderColor: colors.primary }]}
                 activeOpacity={0.8}
-                onPress={() => setShowSuccessModal(false)}>
+                onPress={() => {
+                  setShowSuccessModal(false);
+                  router.back();
+                }}>
                 <MaterialIcons name="share" size={18} color={colors.primary} />
                 <ThemedText style={[styles.modalButtonTextSecondary, { color: colors.primary }]}>
                   Compartilhar link
@@ -440,6 +542,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     gap: 8,
+    overflow: 'hidden',
+  },
+  photoImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 70,
   },
   photoText: {
     fontSize: 13,
@@ -527,22 +635,6 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 18,
   },
-  interestsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    marginTop: 8,
-  },
-  interestChip: {
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1.5,
-  },
-  interestText: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
   bottomSpacer: {
     height: 20,
   },
@@ -576,6 +668,14 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 8,
     elevation: 4,
+  },
+  buttonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  buttonLoader: {
+    marginRight: 4,
   },
   createButtonText: {
     color: '#FFFFFF',

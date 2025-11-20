@@ -1,5 +1,9 @@
 import { Tabs } from 'expo-router';
-import React from 'react';
+import React, { useEffect } from 'react';
+import { Platform } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
+import * as SystemUI from 'expo-system-ui';
+import * as NavigationBar from 'expo-navigation-bar';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -8,17 +12,33 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
+  const colors = Colors[colorScheme ?? 'light'];
+  // Sempre usa o azul do tema claro para a barra de status
+  const primaryBlue = Colors.light.primary;
+
+  useEffect(() => {
+    // Configura a barra de status e navegação do Android para azul (visual imersivo)
+    if (Platform.OS === 'android') {
+      SystemUI.setBackgroundColorAsync(primaryBlue).catch(() => {
+        // Ignora erros se não conseguir configurar
+      });
+      // Usa setStyle que funciona com edge-to-edge habilitado
+      NavigationBar.setStyle('dark');
+    }
+  }, [primaryBlue]);
 
   return (
-    <Tabs
+    <>
+      <StatusBar style="light" backgroundColor={colors.primary} />
+      <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
-        tabBarInactiveTintColor: Colors[colorScheme ?? 'light'].tabIconDefault,
+        tabBarActiveTintColor: '#FFFFFF',
+        tabBarInactiveTintColor: 'rgba(255, 255, 255, 0.6)',
         headerShown: false,
         tabBarButton: HapticTab,
         tabBarStyle: {
-          backgroundColor: Colors[colorScheme ?? 'light'].surface,
-          borderTopColor: Colors[colorScheme ?? 'light'].borderLight,
+          backgroundColor: Colors[colorScheme ?? 'light'].primary,
+          borderTopColor: Colors[colorScheme ?? 'light'].primary,
           borderTopWidth: 1,
           paddingBottom: 28,
           paddingTop: 14,
@@ -74,5 +94,6 @@ export default function TabLayout() {
         }}
       />
     </Tabs>
+    </>
   );
 }
